@@ -1,0 +1,6 @@
+./web-doc
+./web-doc/*
+__pycache__
+*.pyc
+credentials.json
+py_bakalari_tokens.json
