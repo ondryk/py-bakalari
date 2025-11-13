@@ -46,7 +46,7 @@ def main():
             return
 
     # Fetch and print received komens
-    komens = KomensClient(base_url, token_path=client.token_path)
+    komens = KomensClient(client)
     try:
         data = komens.received()
     except Exception as e:

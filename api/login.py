@@ -63,17 +63,16 @@ class LoginError(Exception):
 
 
 class LoginClient:
-    def __init__(self, base_url: str, token_path: Optional[str] = None, session: Optional[requests.Session] = None):
+    def __init__(self, base_url: str, token_path: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
         # Default token file placed in repository root to make examples and tools share it.
         default_path = os.path.join(os.getcwd(), "py_bakalari_tokens.json")
         self.token_path = token_path or default_path
-        self.session = session or requests.Session()
 
     def _login_request(self, data: Dict[str, str]) -> TokenSet:
         url = f"{self.base_url}/api/login"
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
-        resp = self.session.post(url, data=data, headers=headers, timeout=30)
+        resp = requests.post(url, data=data, headers=headers, timeout=30)
         try:
             body = resp.json()
         except Exception:
@@ -148,4 +147,16 @@ class LoginClient:
                 return new.access_token
             except LoginError:
                 return None
+        return token.access_token
+
+    def get_access_token(self) -> str:
+        """Return a valid access token or raise LoginError if unable to obtain one."""
+        token = self.load_tokens()
+        if token is None:
+            raise LoginError("No tokens available; please login first")
+        if token.is_expired():
+            try:
+                token = self.refresh(token.refresh_token)
+            except LoginError as e:
+                raise LoginError(f"Failed to refresh token: {e}")
         return token.access_token
