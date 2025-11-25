@@ -10,6 +10,9 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 import requests
 
@@ -68,6 +71,8 @@ class LoginClient:
         # Default token file placed in repository root to make examples and tools share it.
         default_path = os.path.join(os.getcwd(), "py_bakalari_tokens.json")
         self.token_path = token_path or default_path
+        # last_auth_method: 'cached' | 'refresh' | 'password' or None
+        self.last_auth_method: Optional[str] = None
 
     def _login_request(self, data: Dict[str, str]) -> TokenSet:
         url = f"{self.base_url}/api/login"
@@ -101,6 +106,7 @@ class LoginClient:
         return token
 
     def login_with_password(self, username: str, password: str, client_id: str = "ANDR") -> TokenSet:
+        logger.debug("Performing password login for user %s", username)
         data = {
             "client_id": client_id,
             "grant_type": "password",
@@ -109,12 +115,15 @@ class LoginClient:
         }
         token = self._login_request(data)
         self.save_tokens(token)
+        self.last_auth_method = "password"
         return token
 
     def refresh(self, refresh_token: str, client_id: str = "ANDR") -> TokenSet:
+        logger.debug("Attempting refresh token grant")
         data = {"client_id": client_id, "grant_type": "refresh_token", "refresh_token": refresh_token}
         token = self._login_request(data)
         self.save_tokens(token)
+        self.last_auth_method = "refresh"
         return token
 
     def save_tokens(self, token: TokenSet) -> None:
@@ -125,6 +134,7 @@ class LoginClient:
             os.makedirs(d, exist_ok=True)
         with open(self.token_path, "w", encoding="utf-8") as f:
             json.dump(obj, f, indent=2, ensure_ascii=False)
+        logger.debug("Saved tokens to %s (access_token length=%d, refresh_token length=%d)", self.token_path, len(token.access_token or ""), len(token.refresh_token or ""))
 
     def load_tokens(self) -> Optional[TokenSet]:
         if not os.path.exists(self.token_path):
@@ -158,5 +168,43 @@ class LoginClient:
             try:
                 token = self.refresh(token.refresh_token)
             except LoginError as e:
+                logger.info("Refresh failed: %s", e)
                 raise LoginError(f"Failed to refresh token: {e}")
+        # token valid now
+        self.last_auth_method = self.last_auth_method or "cached"
+        logger.debug("Using access token via %s", self.last_auth_method)
         return token.access_token
+
+    def authenticate(self, username: Optional[str] = None, password: Optional[str] = None, client_id: str = "ANDR") -> TokenSet:
+        """Ensure we have a valid TokenSet.
+
+        Strategy:
+        - If saved tokens exist and are not expired -> return them
+        - If saved tokens exist and expired -> try to refresh and return new tokens
+        - If refresh fails or no saved tokens and credentials provided -> perform password login
+        - Otherwise raise LoginError
+        """
+        token = self.load_tokens()
+        if token is not None:
+            if not token.is_expired():
+                logger.debug("Using saved valid token from %s", self.token_path)
+                self.last_auth_method = "cached"
+                return token
+            # token expired -> try refresh
+            try:
+                new = self.refresh(token.refresh_token, client_id=client_id)
+                logger.debug("Refresh succeeded, obtained new tokens")
+                self.last_auth_method = "refresh"
+                return new
+            except LoginError as e:
+                logger.debug("Refresh failed, will try password login if credentials provided: %s", e)
+                # fallthrough to credential login if available
+                pass
+
+        # No valid token available; try password login if credentials provided
+        if username and password:
+            tok = self.login_with_password(username, password, client_id=client_id)
+            # login_with_password sets last_auth_method
+            return tok
+
+        raise LoginError("No valid tokens available and no credentials provided")

@@ -1,4 +1,4 @@
-py_bakalari - small helper for Bakaláři API login
+py_bakalari - small helper for Bakaláři API
 
 Usage
 - Install dependencies: pip install -r requirements.txt
