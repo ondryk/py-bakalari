@@ -9,7 +9,8 @@ from typing import Optional, Dict, Any
 import re
 import requests
 import logging
-from datetime import date as _date
+from datetime import date as _date, datetime
+import json as _json
 
 from api.login import LoginClient, LoginError
 
@@ -96,22 +97,23 @@ class TimetableClient:
             name = s.get("Abbrev") or s.get("Name") or sid
             subject_map[sid] = name
 
-        # Weekday names in Czech (ASCII-friendly)
+        # Weekday names in Czech (two-letter abbreviations with accents)
         weekday_names = [
-            "Pondeli",
-            "Utery",
-            "Streda",
-            "Ctvrtek",
-            "Patek",
-            "Sobota",
-            "Nedele",
+            "Po",
+            "Út",
+            "St",
+            "Čt",
+            "Pá",
+            "So",
+            "Ne",
         ]
 
-        from datetime import datetime
+        
 
         for day in days_root:
             # Attempt to extract a date string from the day entry
             raw_date = day.get("Date") or day.get("DayName") or None
+            day_type = day.get("DayType")
             day_type = day.get("DayType")
             # Parse ISO datetime if possible
             date_short = ""
@@ -220,6 +222,137 @@ class TimetableClient:
 
         return "\n".join(lines)
 
+    def format_json(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Format timetable response into a structured JSON-friendly dict.
+
+                Output structure:
+                {
+                    "days": [
+                        {
+                            "date": "YYYY-MM-DD",
+                            "day_abbrev": "Po|Út|...",
+                            "hours": [
+                                {"time_range": "HH:MM-HH:MM", "subject": "ČJ", "change": true, "change_text": "..."},
+                                ...
+                            ]
+                        }, ...
+                    ]
+                }
+        """
+        days_root = data.get("Days") or []
+        if not days_root:
+            return {"days": []}
+
+        # build hour map and subject map as in format_text
+        hours_list = data.get("Hours") or []
+        hour_map = {}
+        for hh in hours_list:
+            try:
+                hour_map[int(hh.get("Id"))] = (hh.get("BeginTime", ""), hh.get("EndTime", ""))
+            except Exception:
+                pass
+
+        subjects_list = data.get("Subjects") or []
+        subject_map = {}
+        for s in subjects_list:
+            sid = (s.get("Id") or "").strip()
+            subject_map[sid] = s.get("Abbrev") or s.get("Name") or sid
+
+        days_out = []
+        
+        for day in days_root:
+            raw_date = day.get("Date") or day.get("DayName") or None
+            date_iso = raw_date
+            day_abbrev = ""
+            day_type = day.get("DayType")
+            if raw_date:
+                try:
+                    dt = datetime.fromisoformat(raw_date.split("T", 1)[0])
+                    date_iso = dt.date().isoformat()
+                    # weekday mapping
+                    weekday_names = ["Po", "Út", "St", "Čt", "Pá", "So", "Ne"]
+                    day_abbrev = weekday_names[dt.weekday()]
+                except Exception:
+                    date_iso = raw_date
+                    day_abbrev = day.get("DayName") or ""
+
+            hours_out = []
+            # collect hour entries and sort them by begin time when available
+            raw_atoms = day.get("Atoms", []) or []
+            atom_entries = []
+
+            # If this day is a celebration, add a synthetic full-day hour first
+            # Use 8:00-13:30 time range for celebrations and mark hours_count as 8 later
+            if day_type == "Celebration":
+                dd = day.get("DayDescription") or ""
+                if dd:
+                    # celebration time range (school half-day)
+                    atom_entries.append({
+                        "time_range": "8:00-13:30",
+                        "subject": dd,
+                        "change": False,
+                        "change_text": None,
+                        "_sort_key": (8, 0),
+                    })
+            for atom in raw_atoms:
+                hid = atom.get("HourId")
+                subj_id = (atom.get("SubjectId") or "").strip()
+                subj = subject_map.get(subj_id, subj_id)
+                bt, et = ("", "")
+                if hid is not None:
+                    try:
+                        hid_int = int(hid)
+                    except Exception:
+                        hid_int = hid
+                    bt, et = hour_map.get(hid_int, ("", ""))
+                time_range = f"{bt}-{et}" if bt or et else ""
+
+                non_standard = False
+                change = atom.get("Change")
+                change_text = None
+                if change:
+                    desc = (change.get("Description") or change.get("ChangeType") or "").strip()
+                    change_text = desc
+                    # heuristics: if subject replacement or substitution, mark non_standard
+                    ldesc = desc.lower()
+                    if desc:
+                        non_standard = True
+
+                # compute sortable key from begin time (bt) like '08:00' or '8:00'
+                def _parse_time_key(t: str):
+                    if not t:
+                        return (99, 99)
+                    try:
+                        parts = t.split(":")
+                        h = int(parts[0])
+                        m = int(parts[1]) if len(parts) > 1 else 0
+                        return (h, m)
+                    except Exception:
+                        return (99, 99)
+
+                atom_entries.append({
+                    "time_range": time_range,
+                    "subject": subj,
+                    "change": bool(non_standard),
+                    "change_text": change_text,
+                    "_sort_key": _parse_time_key(bt if bt is not None else ""),
+                })
+
+            # sort by sort_key (begin time) if available
+            atom_entries.sort(key=lambda x: x.get("_sort_key") or "")
+            for ae in atom_entries:
+                ae.pop("_sort_key", None)
+                hours_out.append(ae)
+
+            # compute hours_count: normally number of hours, but celebrations count as 6
+            hours_count = len(hours_out)
+            if day_type == "Celebration":
+                hours_count = 6
+
+            days_out.append({"date": date_iso, "day_abbrev": day_abbrev, "hours": hours_out, "hours_count": hours_count})
+
+        return {"days": days_out}
+
     def get_text(self, date: str) -> str:
         data = self.actual(date)
         return self.format_text(data)
@@ -230,10 +363,15 @@ class TimetableClient:
         If date is required for the format, .date must be provided (for timetable it's required).
         """
         fmt = (fmt or "text").lower()
+        if not date:
+            raise TimetableError("Date is required for timetable output")
+
         if fmt == "text":
-            if not date:
-                raise TimetableError("Date is required for timetable output")
             return self.get_text(date)
+        if fmt == "json":
+            data = self.actual(date)
+            json_out = _json.dumps(self.format_json(data), ensure_ascii=False)
+            return json_out
         raise TimetableError(f"Unsupported format: {fmt}")
 
     def holidays(self, date: str) -> Dict[str, Any]:

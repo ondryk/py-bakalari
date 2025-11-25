@@ -8,7 +8,7 @@ If the file is missing or incomplete the script falls back to interactive prompt
 import argparse
 import json
 import os
-from datetime import date as _date
+from datetime import date as _date, timedelta
 from api.login import LoginClient
 from api.komens import KomensClient
 from api.timetable import TimetableClient
@@ -31,7 +31,7 @@ def main():
     parser.add_argument("--output", choices=["timetable", "komens"], default="timetable",
                         help="Which API output to fetch and print")
     parser.add_argument("--date", help="Date for timetable in YYYY-MM-dd format. If omitted, uses start of current week (Monday).")
-    parser.add_argument("--format", choices=["text"], default="text", help="Output format to use (currently only 'text')")
+    parser.add_argument("--format", choices=["text", "json"], default="text", help="Output format to use (text or json)")
     args, unknown = parser.parse_known_args()
 
     cred_path = os.path.join(os.path.dirname(__file__) or ".", "./credentials.json")
@@ -70,16 +70,12 @@ def main():
         else:
             today = _date.today()
             delta_days = today.weekday()
-            monday = today.replace(day=today.day) - __import__("datetime").timedelta(days=delta_days)
+            monday = today - timedelta(days=delta_days)
             d = monday.isoformat()
 
         try:
             out = tt.get_output(fmt, date=d)
-            # Timetable text output should be printed directly
-            if fmt == "text":
-                print(out)
-            else:
-                logging.getLogger(__name__).info("%s", out)
+            print(out)
         except Exception as e:
             logging.getLogger(__name__).error("Failed to fetch timetable: %s", e)
             return
