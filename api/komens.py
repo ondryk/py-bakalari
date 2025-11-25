@@ -114,3 +114,36 @@ class KomensClient:
                 return int(resp.text.strip())
             except Exception:
                 raise KomensError(f"Invalid response for unread count: {resp.text}")
+
+    def format_text(self, data: Dict[str, Any]) -> str:
+        """Format komens list response into a compact plain-text listing.
+
+        Expects `data` to be the JSON returned by `received()` or similar.
+        """
+        # data may be a dict with Messages, or a list directly
+        messages = data.get("Messages") if isinstance(data, dict) else None
+        if messages is None:
+            messages = data.get("data") if isinstance(data, dict) else None
+        if messages is None and isinstance(data, list):
+            messages = data
+        if not messages:
+            return "No komens messages returned."
+
+        lines = []
+        for m in messages:
+            mid = m.get("Id") or m.get("MessageId") or "?"
+            sender = m.get("From") or m.get("Sender") or m.get("FromName") or ""
+            subject = m.get("Subject") or m.get("Title") or "(no subject)"
+            dt = m.get("Date") or m.get("SentAt") or ""
+            lines.append(f"{mid} | {sender} | {subject} | {dt}")
+        return "\n".join(lines)
+
+    def get_text(self, params: Optional[Dict[str, Any]] = None) -> str:
+        data = self.received(params=params)
+        return self.format_text(data)
+
+    def get_output(self, fmt: str, params: Optional[Dict[str, Any]] = None) -> str:
+        fmt = (fmt or "text").lower()
+        if fmt == "text":
+            return self.get_text(params=params)
+        raise KomensError(f"Unsupported format: {fmt}")
